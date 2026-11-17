@@ -1,0 +1,35 @@
+name: Prijzen
+on:
+  schedule:
+    - cron: '30 4 * * *' # every day 04:30 UTC (05:30/06:30 in NL)
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency: prices
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      # Yesterday's history comes from the data branch so it keeps growing.
+      - name: Load history
+        run: |
+          git fetch origin data || true
+          git show origin/data:price_history.json > assets/price_history.json 2>/dev/null || true
+      - run: dart run tool/sync_prices.dart
+      - name: Publish to the data branch
+        run: |
+          mkdir -p /tmp/out && cp assets/prices.json assets/price_history.json /tmp/out/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan data-new
+          git rm -rf --cached . >/dev/null
+          cp /tmp/out/*.json .
+          git add prices.json price_history.json
+          git commit -m "Prijzen $(date -u +%F)"
+          git push -f origin data-new:data

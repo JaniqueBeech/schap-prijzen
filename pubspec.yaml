@@ -1,0 +1,6 @@
+# The daily price job, without the app. Same package name as the app so
+# tool/sync_prices.dart can import package:schap/data/match_rules.dart.
+name: schap
+publish_to: none
+environment:
+  sdk: ^3.9.0
