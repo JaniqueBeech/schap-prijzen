@@ -7,11 +7,13 @@
 //
 // Source: https://github.com/supermarkt/checkjebon (MIT, "may be reused in
 // other projects"). The dataset holds regular shelf prices only: no
-// promotions, and no data for Picnic or ALDI. In production this script runs
+// promotions, and no data for Picnic or ALDI; promotions come from AH, Jumbo
+// and Hoogvliet themselves (see enrich* and tool/promotions.dart). In production this script runs
 // on a server on a schedule and the app fetches the result.
 import 'dart:convert';
 import 'dart:io';
 import 'package:schap/data/match_rules.dart';
+import 'promotions.dart';
 
 const source =
     'https://raw.githubusercontent.com/supermarkt/checkjebon/main/data/supermarkets.json';
@@ -115,21 +117,83 @@ final _og = RegExp(
   r'''<meta[^>]*(?:content="([^"]+)"[^>]*property="og:image"|property="og:image"[^>]*content="([^"]+)")''',
 );
 
-/// Photo from the product page's Open Graph tag (Jumbo, Hoogvliet).
-Future<void> enrichFromPages(String store, Map<String, dynamic> hits) async {
-  var n = 0;
+String? _ogImage(String html) {
+  final m = _og.firstMatch(html);
+  final img = m?[1] ?? m?[2];
+  return img == null || img.contains('logo') || img.contains('footer')
+      ? null
+      : img;
+}
+
+/// Jumbo: shelf price, photo and the promotion Jumbo states on the product
+/// page. The promotion's own page gives its exact start and end.
+Future<void> enrichJumbo(Map<String, dynamic> hits) async {
+  final now = DateTime.now().toUtc();
+  final promoPages = <String, JumboPromotion?>{};
+  var photos = 0, priced = 0, deals = 0;
+  for (final hit in hits.values) {
+    final url = hit['u'] as String?;
+    final sku = url == null ? null : jumboSku(url);
+    if (url == null) continue;
+    final html = await _get(url, {'user-agent': _browser});
+    if (html == null) continue;
+    final img = _ogImage(html);
+    if (img != null) {
+      hit['img'] = img;
+      photos++;
+    }
+    final product = sku == null ? null : parseJumboProduct(html, sku);
+    if (product == null) continue;
+    hit['p'] = product.shelf;
+    priced++;
+    for (final ref in product.promotions) {
+      if (ref.url == null) continue;
+      final promo = promoPages.containsKey(ref.id)
+          ? promoPages[ref.id]
+          : promoPages[ref.id] = await _get(
+              'https://www.jumbo.com${ref.url}',
+              {'user-agent': _browser},
+            ).then((h) => h == null ? null : parseJumboPromotion(h, ref.id));
+      final deal = promo == null ? null : jumboDeal(product, ref, promo, now);
+      if (deal != null) {
+        hit['deal'] = deal;
+        deals++;
+        break;
+      }
+    }
+  }
+  stdout.writeln(
+    '  jumbo: $priced/${hits.length} priced, $photos photos, $deals deals',
+  );
+}
+
+/// Hoogvliet: shelf price, photo and the current promotion from the product
+/// page (www.hoogvliet.com redirects to hoogvliet.nl).
+Future<void> enrichHoogvliet(Map<String, dynamic> hits) async {
+  final now = DateTime.now().toUtc();
+  var photos = 0, priced = 0, deals = 0;
   for (final hit in hits.values) {
     final url = hit['u'] as String?;
     if (url == null) continue;
     final html = await _get(url, {'user-agent': _browser});
-    final m = html == null ? null : _og.firstMatch(html);
-    final img = m?[1] ?? m?[2];
-    if (img != null && !img.contains('logo') && !img.contains('footer')) {
+    if (html == null) continue;
+    final img = _ogImage(html);
+    if (img != null) {
       hit['img'] = img;
-      n++;
+      photos++;
+    }
+    final product = parseHoogvliet(html, now);
+    if (product == null) continue;
+    hit['p'] = product.shelf;
+    priced++;
+    if (product.deal != null) {
+      hit['deal'] = product.deal;
+      deals++;
     }
   }
-  stdout.writeln('  $store: $n/${hits.length} photos from product pages');
+  stdout.writeln(
+    '  hoogvliet: $priced/${hits.length} priced, $photos photos, $deals deals',
+  );
 }
 
 Future<void> main(List<String> args) async {
@@ -185,9 +249,8 @@ Future<void> main(List<String> args) async {
   if (!args.contains('--no-enrich')) {
     stdout.writeln('Enriching with photos and promotions');
     if (out['ah'] != null) await enrichAh(out['ah']!);
-    for (final store in ['jumbo', 'hoogvliet']) {
-      if (out[store] != null) await enrichFromPages(store, out[store]!);
-    }
+    if (out['jumbo'] != null) await enrichJumbo(out['jumbo']!);
+    if (out['hoogvliet'] != null) await enrichHoogvliet(out['hoogvliet']!);
   }
   _http.close(force: true);
 
@@ -196,7 +259,7 @@ Future<void> main(List<String> args) async {
   await file.writeAsString(
     const JsonEncoder.withIndent(' ').convert({
       'updated': DateTime.now().toUtc().toIso8601String(),
-      'source': 'Checkjebon open data, ah.nl, jumbo.com, hoogvliet.com',
+      'source': 'Checkjebon open data, ah.nl, jumbo.com, hoogvliet.nl',
       'stores': out,
     }),
   );
